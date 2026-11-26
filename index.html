@@ -1663,38 +1663,37 @@ function applyCloudState(parsed) {
   state.paymentLog = parsed.paymentLog || {};
 }
 
-// Fetches the current state via a JSONP <script> tag. `onData` gets the raw
-// JSON text (not yet parsed) on success; `onError` fires on load failure or
-// a 15s timeout (e.g. not signed into the right Google account).
-function jsonpLoad(onData, onError) {
-  const cbName = '__tutorPlanCb' + (_jsonpCounter++);
-  const script = document.createElement('script');
+// Fetches the current state via a hidden <iframe> that navigates to the
+// backend and posts the data back via window.postMessage. A full iframe
+// navigation renders as a real document, so — unlike a <script src> JSONP
+// request — it isn't subject to Chrome's ORB (Opaque Response Blocking),
+// which otherwise silently kills the response on any page with a real
+// http(s) origin (this only ever worked from a file:// page). `onData` gets
+// the raw JSON text on success; `onError` fires on failure or a 15s timeout.
+function iframeLoad(onData, onError) {
   let done = false;
+  const iframe = document.createElement('iframe');
+  iframe.style.display = 'none';
   const cleanup = () => {
-    delete window[cbName];
-    if (script.parentNode) script.parentNode.removeChild(script);
+    window.removeEventListener('message', onMessage);
+    if (iframe.parentNode) iframe.parentNode.removeChild(iframe);
     clearTimeout(timer);
   };
-  window[cbName] = (data) => {
-    if (done) return;
+  const onMessage = (e) => {
+    if (done || !e.data || typeof e.data !== 'object' || !('tutorPlanData' in e.data)) return;
     done = true;
     cleanup();
-    onData(JSON.stringify(data));
+    onData(JSON.stringify(e.data.tutorPlanData));
   };
-  script.onerror = () => {
-    if (done) return;
-    done = true;
-    cleanup();
-    onError(new Error('script load failed'));
-  };
+  window.addEventListener('message', onMessage);
   const timer = setTimeout(() => {
     if (done) return;
     done = true;
     cleanup();
     onError(new Error('timeout'));
   }, 15000);
-  script.src = APPS_SCRIPT_URL + '?callback=' + cbName + '&_=' + Date.now();
-  document.body.appendChild(script);
+  iframe.src = APPS_SCRIPT_URL + '?pm=1&_=' + Date.now();
+  document.body.appendChild(iframe);
 }
 
 // Submits the payload via a hidden form POST (not fetch — exempt from CORS).
@@ -1729,7 +1728,7 @@ function formPostSave(jsonString, onDone) {
 
 function loadState() {
   setSyncStatus('loading');
-  jsonpLoad(
+  iframeLoad(
     (json) => {
       let parsed = {};
       try { parsed = JSON.parse(json || '{}'); } catch(e) { parsed = {}; }
@@ -1788,7 +1787,7 @@ function pollCloudForChanges() {
   if (!_cloudLoaded || _cloudDirty) return;
   if (document.visibilityState !== 'visible') return;
   if (document.querySelector('.modal-overlay.open')) return;
-  jsonpLoad(
+  iframeLoad(
     (json) => {
       if (_cloudDirty) return;
       if (!json || json === _lastKnownCloudJson) return;
